@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gdamore/tcell/v2"
+	"github.com/ktr0731/go-ansisgr"
 	"github.com/ktr0731/go-fuzzyfinder/matching"
 	runewidth "github.com/mattn/go-runewidth"
 	"github.com/pkg/errors"
@@ -26,6 +27,19 @@ var (
 	ErrAbort   = errors.New("abort")
 	errEntered = errors.New("entered")
 )
+
+// Finds the minimum value among the arguments
+func min(vars ...int) int {
+	min := vars[0]
+
+	for _, i := range vars {
+		if min > i {
+			min = i
+		}
+	}
+
+	return min
+}
 
 type state struct {
 	items      []string           // All item names.
@@ -62,6 +76,8 @@ type finder struct {
 	drawTimer *time.Timer
 	eventCh   chan struct{}
 	opt       *opt
+
+	termEventsChan <-chan tcell.Event
 }
 
 func newFinder() *finder {
@@ -80,6 +96,10 @@ func (f *finder) initFinder(items []string, matched []matching.Matched, opt opt)
 		if err := f.term.Init(); err != nil {
 			return errors.Wrap(err, "failed to initialize screen")
 		}
+
+		eventsChan := make(chan tcell.Event)
+		go f.term.ChannelEvents(eventsChan, nil)
+		f.termEventsChan = eventsChan
 	}
 
 	f.opt = &opt
@@ -109,6 +129,14 @@ func (f *finder) initFinder(items []string, matched []matching.Matched, opt opt)
 		f.drawTimer.Stop()
 	}
 	f.eventCh = make(chan struct{}, 30) // A large value
+
+	if opt.query != "" {
+		f.state.input = []rune(opt.query)
+		f.state.cursorX = runewidth.StringWidth(opt.query)
+		f.state.x = len(opt.query)
+		f.filter()
+	}
+
 	return nil
 }
 
@@ -136,8 +164,7 @@ func (f *finder) _draw() {
 	// prompt line
 	var promptLinePad int
 
-	//nolint:staticcheck
-	for _, r := range []rune(f.opt.promptString) {
+	for _, r := range f.opt.promptString {
 		style := tcell.StyleDefault.
 			Foreground(tcell.ColorBlue).
 			Background(tcell.ColorDefault)
@@ -164,7 +191,7 @@ func (f *finder) _draw() {
 	// Header line
 	if len(f.opt.header) > 0 {
 		w = 0
-		for _, r := range []rune(runewidth.Truncate(f.opt.header, maxWidth-2, "..")) {
+		for _, r := range runewidth.Truncate(f.opt.header, maxWidth-2, "..") {
 			style := tcell.StyleDefault.
 				Foreground(tcell.ColorGreen).
 				Background(tcell.ColorDefault)
@@ -276,11 +303,7 @@ func (f *finder) _drawPreview() {
 		idx = f.state.matched[f.state.y].Idx
 	}
 
-	sp := strings.Split(f.opt.previewFunc(idx, width, height), "\n")
-	prevLines := make([][]rune, 0, len(sp))
-	for _, s := range sp {
-		prevLines = append(prevLines, []rune(s))
-	}
+	iter := ansisgr.NewIterator(f.opt.previewFunc(idx, width, height))
 
 	// top line
 	for i := width / 2; i < width; i++ {
@@ -322,6 +345,8 @@ func (f *finder) _drawPreview() {
 	const vline = '│'
 	var wvline = runewidth.RuneWidth(vline)
 	for h := 1; h < height-1; h++ {
+		// donePreviewLine indicates the preview string of the current line identified by h is already drawn.
+		var donePreviewLine bool
 		w := width / 2
 		for i := width / 2; i < width; i++ {
 			switch {
@@ -348,18 +373,24 @@ func (f *finder) _drawPreview() {
 				f.term.SetContent(w, h, ' ', nil, style)
 				w++
 			default: // Preview text
-				if h-1 >= len(prevLines) {
-					w++
+				if donePreviewLine {
 					continue
 				}
-				j := i - width/2 - 2 // Two spaces.
-				l := prevLines[h-1]
-				if j >= len(l) {
-					w++
+
+				r, rstyle, ok := iter.Next()
+				if !ok || r == '\n' {
+					// Consumed all preview characters.
+					donePreviewLine = true
 					continue
 				}
-				rw := runewidth.RuneWidth(l[j])
+
+				rw := runewidth.RuneWidth(r)
 				if w+rw > width-1-2 {
+					donePreviewLine = true
+
+					// Discard the rest of the current line.
+					consumeIterator(iter, '\n')
+
 					style := tcell.StyleDefault.
 						Foreground(tcell.ColorDefault).
 						Background(tcell.ColorDefault)
@@ -371,10 +402,39 @@ func (f *finder) _drawPreview() {
 					continue
 				}
 
-				style := tcell.StyleDefault.
-					Foreground(tcell.ColorDefault).
-					Background(tcell.ColorDefault)
-				f.term.SetContent(w, h, l[j], nil, style)
+				style := tcell.StyleDefault
+				if color, ok := rstyle.Foreground(); ok {
+					switch color.Mode() {
+					case ansisgr.Mode16:
+						style = style.Foreground(tcell.PaletteColor(color.Value() - 30))
+					case ansisgr.Mode256:
+						style = style.Foreground(tcell.PaletteColor(color.Value()))
+					case ansisgr.ModeRGB:
+						r, g, b := color.RGB()
+						style = style.Foreground(tcell.NewRGBColor(int32(r), int32(g), int32(b)))
+					}
+				}
+				if color, valid := rstyle.Background(); valid {
+					switch color.Mode() {
+					case ansisgr.Mode16:
+						style = style.Background(tcell.PaletteColor(color.Value() - 40))
+					case ansisgr.Mode256:
+						style = style.Background(tcell.PaletteColor(color.Value()))
+					case ansisgr.ModeRGB:
+						r, g, b := color.RGB()
+						style = style.Background(tcell.NewRGBColor(int32(r), int32(g), int32(b)))
+					}
+				}
+
+				style = style.
+					Bold(rstyle.Bold()).
+					Dim(rstyle.Dim()).
+					Italic(rstyle.Italic()).
+					Underline(rstyle.Underline()).
+					Blink(rstyle.Blink()).
+					Reverse(rstyle.Reverse()).
+					StrikeThrough(rstyle.Strikethrough())
+				f.term.SetContent(w, h, r, nil, style)
 				w += rw
 			}
 		}
@@ -396,9 +456,10 @@ func (f *finder) draw(d time.Duration) {
 }
 
 // readKey reads a key input.
-// It returns ErrAbort if esc, CTRL-C or CTRL-D keys are inputted.
-// Also, it returns errEntered if enter key is inputted.
-func (f *finder) readKey() error {
+// It returns ErrAbort if esc, CTRL-C or CTRL-D keys are inputted,
+// errEntered in case of enter key, and a context error when the passed
+// context is cancelled.
+func (f *finder) readKey(ctx context.Context) error {
 	f.stateMu.RLock()
 	prevInputLen := len(f.state.input)
 	f.stateMu.RUnlock()
@@ -411,9 +472,23 @@ func (f *finder) readKey() error {
 		}
 	}()
 
-	e := f.term.PollEvent()
+	var e tcell.Event
+
+	select {
+	case ee := <-f.termEventsChan:
+		e = ee
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
 	f.stateMu.Lock()
 	defer f.stateMu.Unlock()
+
+	_, screenHeight := f.term.Size()
+	matchedLinesCount := len(f.state.matched)
+
+	// Max number of lines to scroll by using PgUp and PgDn
+	var pageScrollBy = screenHeight - 3
 
 	switch e := e.(type) {
 	case *tcell.EventKey:
@@ -450,10 +525,10 @@ func (f *finder) readKey() error {
 				f.state.cursorX += runewidth.RuneWidth(f.state.input[f.state.x])
 				f.state.x++
 			}
-		case tcell.KeyCtrlA:
+		case tcell.KeyCtrlA, tcell.KeyHome:
 			f.state.cursorX = 0
 			f.state.x = 0
-		case tcell.KeyCtrlE:
+		case tcell.KeyCtrlE, tcell.KeyEnd:
 			f.state.cursorX = runewidth.StringWidth(string(f.state.input))
 			f.state.x = len(f.state.input)
 		case tcell.KeyCtrlW:
@@ -476,11 +551,10 @@ func (f *finder) readKey() error {
 			f.state.cursorX = 0
 			f.state.x = 0
 		case tcell.KeyUp, tcell.KeyCtrlK, tcell.KeyCtrlP:
-			if f.state.y+1 < len(f.state.matched) {
+			if f.state.y+1 < matchedLinesCount {
 				f.state.y++
 			}
-			_, height := f.term.Size()
-			if f.state.cursorY+1 < height-2 && f.state.cursorY+1 < len(f.state.matched) {
+			if f.state.cursorY+1 < min(matchedLinesCount, screenHeight-2) {
 				f.state.cursorY++
 			}
 		case tcell.KeyDown, tcell.KeyCtrlJ, tcell.KeyCtrlN:
@@ -490,6 +564,13 @@ func (f *finder) readKey() error {
 			if f.state.cursorY-1 >= 0 {
 				f.state.cursorY--
 			}
+		case tcell.KeyPgUp:
+			f.state.y += min(pageScrollBy, matchedLinesCount-1-f.state.y)
+			maxCursorY := min(screenHeight-3, matchedLinesCount-1)
+			f.state.cursorY += min(pageScrollBy, maxCursorY-f.state.cursorY)
+		case tcell.KeyPgDn:
+			f.state.y -= min(pageScrollBy, f.state.y)
+			f.state.cursorY -= min(pageScrollBy, f.state.cursorY)
 		case tcell.KeyTab:
 			if !f.opt.multi {
 				return nil
@@ -612,7 +693,14 @@ func (f *finder) find(slice interface{}, itemFunc func(i int) string, opts []Opt
 		matched []matching.Matched
 	)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	var parentContext context.Context
+	if opt.context != nil {
+		parentContext = opt.context
+	} else {
+		parentContext = context.Background()
+	}
+
+	ctx, cancel := context.WithCancel(parentContext)
 	defer cancel()
 
 	inited := make(chan struct{})
@@ -656,6 +744,10 @@ func (f *finder) find(slice interface{}, itemFunc func(i int) string, opts []Opt
 
 	close(inited)
 
+	if opt.selectOne && len(f.state.matched) == 1 {
+		return []int{f.state.matched[0].Idx}, nil
+	}
+
 	go func() {
 		for {
 			select {
@@ -669,40 +761,45 @@ func (f *finder) find(slice interface{}, itemFunc func(i int) string, opts []Opt
 	}()
 
 	for {
-		f.draw(10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+			f.draw(10 * time.Millisecond)
 
-		err := f.readKey()
-		// hack for earning time to filter exec
-		if isInTesting() {
-			time.Sleep(50 * time.Millisecond)
-		}
-		switch {
-		case errors.Is(err, ErrAbort):
-			return nil, ErrAbort
-		case errors.Is(err, errEntered):
-			f.stateMu.RLock()
-			defer f.stateMu.RUnlock()
-
-			if len(f.state.matched) == 0 {
+			err := f.readKey(ctx)
+			// hack for earning time to filter exec
+			if isInTesting() {
+				time.Sleep(50 * time.Millisecond)
+			}
+			switch {
+			case errors.Is(err, ErrAbort):
 				return nil, ErrAbort
-			}
-			if f.opt.multi {
-				if len(f.state.selection) == 0 {
-					return []int{f.state.matched[f.state.y].Idx}, nil
+			case errors.Is(err, errEntered):
+				f.stateMu.RLock()
+				defer f.stateMu.RUnlock()
+
+				if len(f.state.matched) == 0 {
+					return nil, ErrAbort
 				}
-				poss, idxs := make([]int, 0, len(f.state.selection)), make([]int, 0, len(f.state.selection))
-				for idx, pos := range f.state.selection {
-					idxs = append(idxs, idx)
-					poss = append(poss, pos)
+				if f.opt.multi {
+					if len(f.state.selection) == 0 {
+						return []int{f.state.matched[f.state.y].Idx}, nil
+					}
+					poss, idxs := make([]int, 0, len(f.state.selection)), make([]int, 0, len(f.state.selection))
+					for idx, pos := range f.state.selection {
+						idxs = append(idxs, idx)
+						poss = append(poss, pos)
+					}
+					sort.Slice(idxs, func(i, j int) bool {
+						return poss[i] < poss[j]
+					})
+					return idxs, nil
 				}
-				sort.Slice(idxs, func(i, j int) bool {
-					return poss[i] < poss[j]
-				})
-				return idxs, nil
+				return []int{f.state.matched[f.state.y].Idx}, nil
+			case err != nil:
+				return nil, errors.Wrap(err, "failed to read a key")
 			}
-			return []int{f.state.matched[f.state.y].Idx}, nil
-		case err != nil:
-			return nil, errors.Wrap(err, "failed to read a key")
 		}
 	}
 }
@@ -746,4 +843,13 @@ func (f *finder) FindMulti(slice interface{}, itemFunc func(i int) string, opts 
 
 func isInTesting() bool {
 	return flag.Lookup("test.v") != nil
+}
+
+func consumeIterator(iter *ansisgr.Iterator, r rune) {
+	for {
+		r, _, ok := iter.Next()
+		if !ok || r == '\n' {
+			return
+		}
+	}
 }

@@ -68,6 +68,11 @@ type Config struct {
 	// default: true
 	// + optional
 	ShowPreview *bool `yaml:"showPreview"`
+
+	// QuickSearch configures the action when no arguments are detected. When true it will show the fuzzy search with your promt prefilled, when false it will try to set the context name you provided
+	// default: false
+	// + optional
+	QuickSearch *bool `yaml:"quickSearch"`
 	// ExecShell configures the shell to be used for switch exec -- "command"
 	// If a shell (bash, zsh, sh) is provided, the command is executed like so
 	// --> bash -c "your_command"

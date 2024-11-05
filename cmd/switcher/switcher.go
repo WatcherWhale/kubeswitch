@@ -48,6 +48,7 @@ var (
 	kubeconfigPath string
 	kubeconfigName string
 	showPreview    bool
+	quickSearch    bool
 	deleteContext  bool
 	unsetContext   bool
 	currentContext bool
@@ -118,7 +119,7 @@ var (
 				showPreview = false
 			}
 
-			kubeconfigPath, contextName, err := pkg.Switcher(stores, config, stateDirectory, noIndex, showPreview)
+			kubeconfigPath, contextName, err := pkg.Switcher(stores, config, stateDirectory, noIndex, showPreview, "")
 			reportNewContext(kubeconfigPath, contextName)
 			return err
 		},

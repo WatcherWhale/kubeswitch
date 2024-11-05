@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/danielfoehrkn/kubeswitch/pkg"
 	delete_context "github.com/danielfoehrkn/kubeswitch/pkg/subcommands/delete-context"
 	"github.com/danielfoehrkn/kubeswitch/pkg/subcommands/history"
 	"github.com/danielfoehrkn/kubeswitch/pkg/subcommands/hooks"
@@ -126,9 +127,33 @@ var (
 				return err
 			}
 
-			kubeconfigPath, contextName, err := set_context.SetContext(args[0], stores, config, stateDirectory, noIndex, true)
-			reportNewContext(kubeconfigPath, contextName)
-			return err
+			if !quickSearch && config.QuickSearch != nil && *config.QuickSearch {
+				quickSearch = true
+			}
+
+			if !quickSearch {
+				kubeconfigPath, contextName, err := set_context.SetContext(args[0], stores, config, stateDirectory, noIndex, true)
+
+				if err != nil {
+					return err
+				}
+
+				reportNewContext(kubeconfigPath, contextName)
+				return err
+			} else {
+				if showPreview && config.ShowPreview != nil && !*config.ShowPreview {
+					showPreview = false
+				}
+
+				kubeconfigPath, contextName, err := pkg.Switcher(stores, config, stateDirectory, noIndex, showPreview, args[0])
+
+				if err != nil {
+					return err
+				}
+
+				reportNewContext(kubeconfigPath, contextName)
+				return nil
+			}
 		},
 		SilenceUsage: true,
 	}
@@ -255,6 +280,12 @@ func setFlagsForContextCommands(command *cobra.Command) {
 		"show-preview",
 		true,
 		"show preview of the selected kubeconfig. Possibly makes sense to disable when using vault as the kubeconfig store to prevent excessive requests against the API.")
+	command.Flags().BoolVar(
+		&quickSearch,
+		"quick-search",
+		false,
+		"Use the fuzzy finder instead of setting the context.",
+	)
 }
 
 func reportNewContext(kubeconfigPath *string, contextName *string) {

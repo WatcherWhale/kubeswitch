@@ -64,7 +64,7 @@ var (
 	logger = logrus.New()
 )
 
-func Switcher(stores []store.KubeconfigStore, config *types.Config, stateDir string, noIndex, showPreview bool) (*string, *string, error) {
+func Switcher(stores []store.KubeconfigStore, config *types.Config, stateDir string, noIndex, showPreview bool, initialQuery string) (*string, *string, error) {
 	c, err := DoSearch(stores, config, stateDir, noIndex)
 	if err != nil {
 		return nil, nil, err
@@ -113,7 +113,7 @@ func Switcher(stores []store.KubeconfigStore, config *types.Config, stateDir str
 
 	defer logSearchErrors()
 
-	kubeconfigPath, selectedContext, err := showFuzzySearch(kindToStore, showPreview)
+	kubeconfigPath, selectedContext, err := showFuzzySearch(kindToStore, showPreview, initialQuery)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -200,14 +200,14 @@ func writeIndex(store store.KubeconfigStore, searchIndex *index.SearchIndex, ctx
 	}
 }
 
-func showFuzzySearch(storeIDToStore map[string]store.KubeconfigStore, showPreview bool) (string, string, error) {
+func showFuzzySearch(storeIDToStore map[string]store.KubeconfigStore, showPreview bool, initialQuery string) (string, string, error) {
 	// display selection dialog for all kubeconfig context names
 	idx, err := fuzzyfinder.Find(
 		&allKubeconfigContextNames,
 		func(i int) string {
 			return readFromAllKubeconfigContextNames(i)
 		},
-		getFuzzyFinderOptions(storeIDToStore, showPreview)...,
+		getFuzzyFinderOptions(storeIDToStore, showPreview, initialQuery)...,
 	)
 
 	if err != nil {
@@ -222,8 +222,11 @@ func showFuzzySearch(storeIDToStore map[string]store.KubeconfigStore, showPrevie
 }
 
 // getFuzzyFinderOptions returns a list of fuzzy finder options
-func getFuzzyFinderOptions(storeIDToStore map[string]store.KubeconfigStore, showPreview bool) []fuzzyfinder.Option {
-	options := []fuzzyfinder.Option{fuzzyfinder.WithHotReloadLock(hotReloadLock.RLocker())}
+func getFuzzyFinderOptions(storeIDToStore map[string]store.KubeconfigStore, showPreview bool, initialQuery string) []fuzzyfinder.Option {
+	options := []fuzzyfinder.Option{
+		fuzzyfinder.WithHotReloadLock(hotReloadLock.RLocker()),
+		fuzzyfinder.WithQuery(initialQuery),
+	}
 
 	if showPreview {
 		log := logrus.New()
