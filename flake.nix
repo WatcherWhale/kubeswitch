@@ -50,9 +50,14 @@
               ];
 
               subPackages = [ "cmd" ];
+              nativeBuildInputs = [ pkgs.installShellFiles ];
 
               postInstall = ''
-                mv $out/bin/cmd $out/bin/kubeswitch
+                mv $out/bin/cmd $out/bin/switcher
+                for shell in bash zsh fish; do
+                  $out/bin/switcher --cmd switcher completion $shell > switcher.$shell
+                  installShellCompletion --$shell switcher.$shell
+                done
               '';
 
             };
