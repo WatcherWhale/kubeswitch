@@ -19,7 +19,7 @@
 package tools
 
 import (
+	_ "github.com/google/addlicense"
 	_ "github.com/onsi/ginkgo/v2/ginkgo"
 	_ "golang.org/x/tools/cmd/goimports"
-	_ "github.com/google/addlicense"
 )

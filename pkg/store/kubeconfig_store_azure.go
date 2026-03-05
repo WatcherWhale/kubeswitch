@@ -31,6 +31,8 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/containerservice/armcontainerservice"
 	storetypes "github.com/danielfoehrkn/kubeswitch/pkg/store/types"
 	"github.com/danielfoehrkn/kubeswitch/types"
+
+	clientcmd "k8s.io/client-go/tools/clientcmd"
 )
 
 func init() {
@@ -272,6 +274,15 @@ func (s *AzureStore) GetKubeconfigForPath(path string, tags map[string]string) (
 		}
 
 		kubeconfigs = resp_user.Kubeconfigs
+
+		for i, config := range kubeconfigs {
+			newConfigBytes, err := KubeLoginTransform(config.Value)
+			if err != nil {
+				return nil, fmt.Errorf("failed to transform kubeconfig for AKS cluster %q in resource group %q: %w", clusterName, resourceGroup, err)
+			}
+
+			kubeconfigs[i].Value = newConfigBytes
+		}
 	} else {
 		resp_admin, err := s.AksClient.ListClusterAdminCredentials(ctx, resourceGroup, clusterName, nil)
 		if err != nil {
@@ -375,4 +386,26 @@ func (s *AzureStore) insertIntoClusterCache(key string, value *armcontainerservi
 	s.DiscoveredClustersMutex.Lock()
 	defer s.DiscoveredClustersMutex.Unlock()
 	s.DiscoveredClusters[key] = value
+}
+
+func KubeLoginTransform(configBytes []byte) ([]byte, error) {
+	config, err := clientcmd.Load(configBytes)
+	if err != nil {
+		return configBytes, err
+	}
+
+	for _, ai := range config.AuthInfos {
+		if ai.Exec == nil || ai.Exec.Command != "kubelogin" {
+			continue
+		}
+
+		for i, arg := range ai.Exec.Args {
+			if arg == "devicecode" {
+				ai.Exec.Args[i] = "azurecli"
+				break
+			}
+		}
+	}
+
+	return clientcmd.Write(*config)
 }
